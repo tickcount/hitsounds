@@ -1,0 +1,107 @@
+name: CI
+
+# Every push and pull request: check the sounds and pack the archive.
+# A push to master that changes hitsounds/ also refreshes the sound list in the
+# READMEs and publishes a release with hitsounds.zip.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish a release even when no sound changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the sounds
+        run: python3 scripts/hitsounds.py check
+
+      - name: Pack the archive
+        run: python3 scripts/hitsounds.py build --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hitsounds
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: check
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update the sound list in the READMEs
+        run: |
+          python3 scripts/hitsounds.py readme
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898233+github-actions[bot]@users.noreply.github.com"
+            git commit -am "Update the sound list"
+            git push origin HEAD:master
+          fi
+
+      - name: Decide on a release
+        id: plan
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          now=$(git rev-parse HEAD:hitsounds)
+          was=$( [ -n "$last" ] && git rev-parse -q --verify "$last:hitsounds" || true)
+          if [ "$now" = "$was" ] && [ "$FORCE" != "true" ]; then
+            echo "No sound changed since $last, nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="v$(date -u +%Y.%m.%d)"
+          tag=$base n=1
+          while git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do
+            n=$((n + 1)) tag="$base.$n"
+          done
+          echo "Releasing $tag (previous: ${last:-none})"
+          {
+            echo "release=true"
+            echo "tag=$tag"
+            echo "last=$last"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Pack the archive
+        if: steps.plan.outputs.release == 'true'
+        run: |
+          python3 scripts/hitsounds.py build --out dist
+          python3 scripts/hitsounds.py notes ${{ steps.plan.outputs.last && format('--base {0}', steps.plan.outputs.last) || '' }} > notes.md
+          cat notes.md
+
+      - name: Publish the release
+        if: steps.plan.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          gh release create "$TAG" dist/hitsounds.zip dist/sha256sums.txt \
+            --target "$(git rev-parse HEAD)" \
+            --title "$TAG" \
+            --notes-file notes.md

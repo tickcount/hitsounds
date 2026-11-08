@@ -1,0 +1,8 @@
+dist/
+__pycache__/
+.DS_Store
+Thumbs.db
+
+# The README screenshot's tooling and its Figma parts stay local; docs/screenshots/menu.png is committed.
+scripts/frame-screenshots.py
+docs/screenshots/raw/
